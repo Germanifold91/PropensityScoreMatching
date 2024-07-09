@@ -1,14 +1,99 @@
 """ Propensity Score Matching Class"""
 
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import datetime
 from typing import List
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.neighbors import NearestNeighbors
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
+
+
+def plot_cdf(
+    df_muestra,
+    df_referencia,
+    column,
+    labels=("Muestra", "Referencia Global"),
+    colors=("blue", "red"),
+):
+    """
+    Plot CDFs for a specified column from two DataFrames on the same plot with mean and sd annotations.
+
+    Parameters:
+    df_muestra (pd.DataFrame): First DataFrame.
+    df_referencia (pd.DataFrame): Second DataFrame.
+    column (str): Column name to plot the CDF for.
+    labels (tuple): Labels for the DataFrames.
+    colors (tuple): Colors for the CDFs of each DataFrame.
+    """
+    plt.figure(figsize=(8, 6))
+
+    # Calculate and plot CDF for the first DataFrame
+    data1 = df_muestra[column].dropna().sort_values()
+    cdf1 = np.arange(len(data1)) / float(len(data1) - 1)
+    plt.plot(
+        data1,
+        cdf1,
+        label=f"{labels[0]} - Mean: {data1.mean():.2f},\nSD: {data1.std():.2f}",
+        color=colors[0],
+    )
+
+    # Calculate and plot CDF for the second DataFrame
+    data2 = df_referencia[column].dropna().sort_values()
+    cdf2 = np.arange(len(data2)) / float(len(data2) - 1)
+    plt.plot(
+        data2,
+        cdf2,
+        label=f"{labels[1]} - Mean: {data2.mean():.2f},\nSD: {data2.std():.2f}",
+        color=colors[1],
+    )
+
+    plt.title(f"Cumulative Distribution Function of {column}")
+    plt.xlabel(column)
+    plt.ylabel("CDF")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+
+def plot_histogram(
+    data: pd.DataFrame,
+    treatment_col: str,
+    value_col: str,
+    titulo: str,
+    plot_size: tuple = (10, 6),
+):
+    """
+    Plot the propensity scores for the treatment and control groups.
+    """
+    fig, ax = plt.subplots(figsize=plot_size)
+
+    # Visualize propensity scores
+    sns.kdeplot(
+        data=data[data[treatment_col] == True],
+        x=value_col,
+        fill=True,
+        color="#5af8bd",
+        label="Tratamiento",
+        ax=ax,
+    )
+    sns.kdeplot(
+        data=data[data[treatment_col] == False],
+        x=value_col,
+        fill=True,
+        color="#131538",
+        label="Control",
+        ax=ax,
+    )
+    ax.set_title(titulo)
+    ax.legend()
+
+    plt.tight_layout()
+    plt.show()
 
 
 class PSMatch:
@@ -169,3 +254,131 @@ class PSMatch:
         self.matched_data = pd.DataFrame(matched_pairs)
 
         return self.matched_data
+
+    def plot_cumulative_distribution(
+        self, matched_data: pd.DataFrame, historic_data: pd.DataFrame
+    ):
+        """ """
+        control_ids = list(matched_data["control_id"].unique())
+        treatmen_id = list(matched_data["treated_id"].unique())
+
+        start_date = self.data[self.data["TRATAMIENTO_INICIO"] == True]["PERIODO"].max()
+        latest_date = self.data["PERIODO"].max()
+
+        historic_data[self.outcome_col] = pd.to_numeric(
+            historic_data[self.outcome_col], errors="coerce"
+        )
+
+        control_pre = historic_data[
+            (historic_data["CLIENTE"].isin(control_ids))
+            & (historic_data["PERIODO"] <= start_date)
+        ].copy()
+        treatmen_pre = historic_data[
+            (historic_data["CLIENTE"].isin(treatmen_id))
+            & (historic_data["PERIODO"] <= start_date)
+        ].copy()
+
+        control_post = historic_data[
+            (historic_data["CLIENTE"].isin(control_ids))
+            & (historic_data["PERIODO"] > start_date)
+        ].copy()
+        treatmen_post = historic_data[
+            (historic_data["CLIENTE"].isin(treatmen_id))
+            & (historic_data["PERIODO"] > start_date)
+        ].copy()
+
+        plot_cdf(
+            treatmen_pre,
+            control_pre,
+            self.outcome_col,
+            labels=("Tratamiento_PRE", "Control_PRE"),
+        )
+
+        plot_cdf(
+            treatmen_post,
+            control_post,
+            self.outcome_col,
+            labels=("Tratamiento_POST", "Control_POST"),
+        )
+
+    def plot_sales(self, matched_data: pd.DataFrame, historic_data: pd.DataFrame):
+        """ """
+        control_ids = list(matched_data["control_id"].unique())
+        treatmen_id = list(matched_data["treated_id"].unique())
+
+        start_date = historic_data[historic_data["TRATAMIENTO_INICIO"] == True][
+            "PERIODO"
+        ].max()
+        latest_date = historic_data["PERIODO"].max()
+
+        # Two times Number of days between the start of the treatment and the end of the data
+        treatment_days = (latest_date - start_date).days
+
+        # Start date minus two times treatment_days
+        limit_date = start_date - datetime.timedelta(days=2 * treatment_days)
+        print(start_date, latest_date, limit_date)
+
+        sales_evol = historic_data[
+            (historic_data["CLIENTE"].isin(treatmen_id + control_ids))
+        ][["CLIENTE", "GRUPO_TRATAMIENTO", "PERIODO", "TOTAL_SUBGRUPO"]]
+
+        sales_evol["PERIODO"] = pd.to_datetime(sales_evol["PERIODO"])
+
+        # Calculate the ventas_periodo DataFrame
+        sales_divide = (
+            sales_evol.groupby(["PERIODO", "GRUPO_TRATAMIENTO"])
+            .agg(PROMEDIO_VENTAS_TIENDA=("TOTAL_SUBGRUPO", "mean"))
+            .reset_index()
+        )
+
+        # Create the plot
+        fig, ax = plt.subplots()
+        sales_divide[sales_divide["PERIODO"] >= str(limit_date)].pivot_table(
+            index="PERIODO",
+            columns="GRUPO_TRATAMIENTO",
+            values="PROMEDIO_VENTAS_TIENDA",
+        ).plot(ax=ax)
+
+        # Add a vertical line at start of trial
+        ax.axvline(pd.to_datetime(start_date), color="red", linestyle="--", linewidth=2)
+
+        # Adjust plot size
+        fig.set_size_inches(14, 7)
+
+        # Show the plot
+        plt.show()
+
+    def plot_sales_histogram(
+        self, matched_data: pd.DataFrame, historic_data: pd.DataFrame
+    ):
+        """ """
+        control_ids = list(matched_data["control_id"].unique())
+        treatmen_id = list(matched_data["treated_id"].unique())
+
+        start_date = historic_data[historic_data["TRATAMIENTO_INICIO"] == True][
+            "PERIODO"
+        ].max()
+
+        sales_evol = historic_data[
+            (historic_data["CLIENTE"].isin(treatmen_id + control_ids))
+        ][["CLIENTE", "GRUPO_TRATAMIENTO", "PERIODO", "TOTAL_SUBGRUPO"]]
+
+        # Calculate the ventas_periodo DataFrame
+        sales_divide = (
+            sales_evol.groupby(["PERIODO", "GRUPO_TRATAMIENTO"])
+            .agg(PROMEDIO_VENTAS_TIENDA=("TOTAL_SUBGRUPO", "mean"))
+            .reset_index()
+        )
+
+        plot_histogram(
+            sales_divide[sales_divide["PERIODO"] <= start_date],
+            "GRUPO_TRATAMIENTO",
+            "PROMEDIO_VENTAS_TIENDA",
+            "Distribución de Ventas por Dia Pre Piloto",
+        )
+        plot_histogram(
+            sales_divide[sales_divide["PERIODO"] > start_date],
+            "GRUPO_TRATAMIENTO",
+            "PROMEDIO_VENTAS_TIENDA",
+            "Distribución de Ventas por Dia Pre Piloto",
+        )
